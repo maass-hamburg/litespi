@@ -131,6 +131,7 @@ class LiteSPISDRPHYCore(LiteXModule):
         sr_out       = Signal().like(sink.data)
         sr_in_shift  = Signal()
         sr_in        = Signal().like(sink.data)
+        sr_in_now    = Signal().like(sink.data)
 
         no_read = Signal()
         last_sink_width = Signal.like(sink.width)
@@ -168,15 +169,25 @@ class LiteSPISDRPHYCore(LiteXModule):
         )
 
         # Data In Shift.
-        self.sync += If(sr_in_shift,
+        self.comb += If(sr_in_shift,
             Case(last_sink_width, {
-                1 : sr_in.eq(Cat(dq_i[1], sr_in)),
-                2 : sr_in.eq(Cat(dq_i[:2], sr_in)),
-                4 : sr_in.eq(Cat(dq_i[:4], sr_in)),
-                8 : sr_in.eq(Cat(dq_i[:8], sr_in)),
+                1 : sr_in_now.eq(Cat(dq_i[1], sr_in)),
+                2 : sr_in_now.eq(Cat(dq_i[:2], sr_in)),
+                4 : sr_in_now.eq(Cat(dq_i[:4], sr_in)),
+                8 : sr_in_now.eq(Cat(dq_i[:8], sr_in)),
             }),
-            sr_in_cnt.eq(sr_in_cnt - last_sink_width),
+        ).Else(
+            sr_in_now.eq(sr_in),
         )
+
+        self.sync += [
+            If(sr_in_shift,
+                sr_in_cnt.eq(sr_in_cnt - last_sink_width),
+            ),
+            sr_in.eq(sr_in_now),
+        ]
+
+        self.comb += source.data.eq(sr_in_now)
 
         # FSM.
         self.fsm = fsm = FSM(reset_state="WAIT-CMD-DATA")
@@ -210,9 +221,14 @@ class LiteSPISDRPHYCore(LiteXModule):
                 # End XFer.
                 If(sr_out_cnt == 0,
                     self.clkgen.en.eq(0),
+                    NextValue(dq_oe, 0),
                     NextState("XFER-END"),
                     If(no_read | (sr_in_cnt == 0) | (clkgen.posedge_reg2 & (sr_in_cnt == last_sink_width)),
                         NextState("SEND-STATUS-DATA"),
+                        source.valid.eq(1),
+                        If(source.ready,
+                            NextState("WAIT-CMD-DATA"),
+                        )
                     ),
                 ),
             ),
@@ -224,14 +240,16 @@ class LiteSPISDRPHYCore(LiteXModule):
                 If(sr_in_cnt == last_sink_width,
                     # Send Status/Data to Core.
                     NextState("SEND-STATUS-DATA"),
+                    source.valid.eq(1),
+                    If(source.ready,
+                        NextState("WAIT-CMD-DATA"),
+                    )
                 ),
             ),
         )
-        self.comb += source.data.eq(sr_in)
         fsm.act("SEND-STATUS-DATA",
             # Send Data In to Core and return to WAIT when accepted.
             source.valid.eq(1),
-            NextValue(dq_oe, 0),
             If(source.ready,
                 NextState("WAIT-CMD-DATA"),
             )
